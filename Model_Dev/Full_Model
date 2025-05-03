@@ -3,7 +3,6 @@ import random
 import pathlib
 import itertools
 import collections
-
 import os
 import cv2
 import numpy as np
@@ -96,8 +95,7 @@ converter.optimizations = [tf.lite.Optimize.DEFAULT]
 tflite_model = converter.convert()
 
 open("posture_model.tflite", "wb").write(tflite_model)
-  
-import os
+
 basic_model_size = os.path.getsize("posture_model.tflite")
 print("Model is %d bytes" % basic_model_size)
 
@@ -115,6 +113,5 @@ with open(header_file, "w") as f:
         f.write("    " + ", ".join(f"0x{b:02x}" for b in model_data[i:i+12]) + ",\n")
     f.write("};\n")
 
-import os
 posture_model_size = os.path.getsize(header_file)
 print(f"Header file, {header_file}, is {posture_model_size:,} bytes.")
