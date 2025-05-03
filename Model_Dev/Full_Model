@@ -1,0 +1,120 @@
+import tqdm
+import random
+import pathlib
+import itertools
+import collections
+
+import os
+import cv2
+import numpy as np
+import tensorflow as tf
+from IPython import display
+from urllib import request
+import matplotlib.pyplot as plt
+
+def extract_frames(video_path, output_folder, frame_rate=1):
+    os.makedirs(output_folder, exist_ok=True)
+    cap = cv2.VideoCapture(video_path)
+
+    if not cap.isOpened():
+        print(f"Error: Could not open {video_path}")
+        return
+    
+    fps = int(cap.get(cv2.CAP_PROP_FPS))
+    frame_interval = max(1, fps // frame_rate)  # Prevent division by zero
+    frame_count = 0
+    saved_count = 0
+
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
+        if frame_count % frame_interval == 0:
+            frame_filename = os.path.join(output_folder, f"{os.path.basename(video_path).split('.')[0]}_frame_{saved_count}.jpg")
+            cv2.imwrite(frame_filename, frame)
+            saved_count += 1
+        frame_count += 1
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+GoodPostureVideos = ['Good Posture F.mp4', 'Good Posture M.mp4', 'Good Posture L.mp4']
+BadPostureVideos = ['Bad Posture F.mp4', 'Bad Posture M.mp4', 'Bad Posture L.mp4']
+
+# Extract frames from all videos
+for video in GoodPostureVideos:
+    extract_frames(video, "frames/good")
+
+for video in BadPostureVideos:
+    extract_frames(video, "frames/bad")
+data_dir = "frames" 
+batch_size = 32
+img_size = (96, 96)  
+
+# Create dataset
+train_ds = tf.keras.preprocessing.image_dataset_from_directory(
+    data_dir,
+    image_size=img_size,
+    batch_size=batch_size,
+    color_mode="grayscale", 
+    shuffle=True
+)
+
+# Normalize images 
+def normalize_img(image, label):
+    image = tf.cast(image, tf.float32) / 255.0
+    return image, label
+
+train_ds = train_ds.map(normalize_img)
+
+# Prefetch for performance
+AUTOTUNE = tf.data.AUTOTUNE
+train_ds = train_ds.prefetch(buffer_size=AUTOTUNE)
+
+# Check dataset output
+for images, labels in train_ds.take(1):
+    print(f"Image shape: {images.shape}, Labels: {labels.numpy()}")
+
+model = tf.keras.Sequential([
+    tf.keras.layers.Conv2D(16, (3,3), activation='relu', input_shape=(96,96,1)),
+    tf.keras.layers.MaxPooling2D(),
+    tf.keras.layers.Conv2D(32, (3,3), activation='relu'),
+    tf.keras.layers.MaxPooling2D(),
+    tf.keras.layers.Flatten(),
+    tf.keras.layers.Dense(64, activation='relu'),
+    tf.keras.layers.Dense(1, activation='sigmoid')  # Binary classification (good/bad)
+])
+
+model.compile(optimizer='adam',
+              loss='binary_crossentropy',
+              metrics=['accuracy'])
+
+model.fit(train_ds, validation_data=val_ds, epochs=32)
+
+converter = tf.lite.TFLiteConverter.from_keras_model(model)
+converter.optimizations = [tf.lite.Optimize.DEFAULT]
+tflite_model = converter.convert()
+
+open("posture_model.tflite", "wb").write(tflite_model)
+  
+import os
+basic_model_size = os.path.getsize("posture_model.tflite")
+print("Model is %d bytes" % basic_model_size)
+
+model_file = "posture_model.tflite" 
+header_file = "posture_model.h"
+
+# Read the model file as binary
+with open(model_file, "rb") as f:
+    model_data = f.read()
+
+# Write the binary data into the C header file format
+with open(header_file, "w") as f:
+    f.write("const unsigned char model[] = {\n")
+    for i in range(0, len(model_data), 12): 
+        f.write("    " + ", ".join(f"0x{b:02x}" for b in model_data[i:i+12]) + ",\n")
+    f.write("};\n")
+
+import os
+posture_model_size = os.path.getsize(header_file)
+print(f"Header file, {header_file}, is {posture_model_size:,} bytes.")
