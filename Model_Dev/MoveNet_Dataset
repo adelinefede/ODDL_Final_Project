@@ -1,70 +1,123 @@
 import tensorflow as tf
+import tensorflow_hub as hub
 import numpy as np
-from matplotlib import pyplot as plt
 import cv2
-import time
+import math
 import csv
 import os
-  
-interpreter = tf.lite.Interpreter(model_path='3.tflite')
-interpreter.allocate_tensors()
-  
-def draw_keypoints(frame, keypoints, confidence_threshold):
-    y, x, c = frame.shape
-    shaped = np.squeeze(np.multiply(keypoints, [y,x,1]))
-    
-    for kp in shaped:
-        ky, kx, kp_conf = kp
-        if kp_conf > confidence_threshold:
-            cv2.circle(frame, (int(kx), int(ky)), 4, (0,255,0), -1) 
+import zipfile
 
-EDGES = {
-    (0, 1): 'm',
-    (0, 2): 'c',
-    (1, 3): 'm',
-    (2, 4): 'c',
-    (0, 5): 'm',
-    (0, 6): 'c',
-    (5, 7): 'm',
-    (7, 9): 'm',
-    (6, 8): 'c',
-    (8, 10): 'c',
-    (5, 6): 'y',
-    (5, 11): 'm',
-    (6, 12): 'c',
-    (11, 12): 'y',
-    (11, 13): 'm',
-    (13, 15): 'm',
-    (12, 14): 'c',
-    (14, 16): 'c'
+# Define keypoints
+KEYPOINT_DICT = {
+    0: 'nose', 1: 'left_eye', 2: 'right_eye', 3: 'left_ear', 4: 'right_ear',
+    5: 'left_shoulder', 6: 'right_shoulder', 7: 'left_elbow', 8: 'right_elbow',
+    9: 'left_wrist', 10: 'right_wrist', 11: 'left_hip', 12: 'right_hip',
+    13: 'left_knee', 14: 'right_knee', 15: 'left_ankle', 16: 'right_ankle'
 }
 
-def calculate_angle(v1, v2):
-    dot_product = np.dot(v1, v2)
-    norm_v1 = np.linalg.norm(v1)
-    norm_v2 = np.linalg.norm(v2)
-    cos_angle = dot_product / (norm_v1 * norm_v2)
-    angle_rad = np.arccos(np.clip(cos_angle, -1.0, 1.0))  # Clip to avoid out of range errors
-    return np.degrees(angle_rad) 
+EDGES = {
+    ('left_shoulder', 'right_shoulder'): (0, 255, 0),
+    ('left_shoulder', 'left_elbow'): (255, 0, 0),
+    ('left_elbow', 'left_wrist'): (255, 0, 0),
+    ('right_shoulder', 'right_elbow'): (0, 0, 255),
+    ('right_elbow', 'right_wrist'): (0, 0, 255),
+    ('left_shoulder', 'left_hip'): (255, 0, 0),
+    ('right_shoulder', 'right_hip'): (0, 0, 255),
+    ('left_hip', 'right_hip'): (0, 255, 0),
+    ('left_hip', 'left_knee'): (255, 0, 0),
+    ('left_knee', 'left_ankle'): (255, 0, 0),
+    ('right_hip', 'right_knee'): (0, 0, 255),
+    ('right_knee', 'right_ankle'): (0, 0, 255)
+}
 
+def compute_vectors_and_angles(keypoints, width, height, threshold=0.3):
+    kp_dict = {}
+    for i, kp in enumerate(keypoints):
+        y, x, score = kp
+        if score > threshold:
+            kp_dict[KEYPOINT_DICT[i]] = (int(x * width), int(y * height))
+    vectors, angles = {}, {}
+    for (p1, p2) in EDGES:
+        if p1 in kp_dict and p2 in kp_dict:
+            x1, y1 = kp_dict[p1]
+            x2, y2 = kp_dict[p2]
+            vx, vy = x2 - x1, y2 - y1
+            angle = math.degrees(math.atan2(vy, vx))
+            vectors[(p1, p2)] = (vx, vy)
+            angles[(p1, p2)] = abs(angle)
+    return vectors, angles
 
-def draw_connections(frame, keypoints, edges, confidence_threshold):
-    y, x, c = frame.shape
-    shaped = np.squeeze(np.multiply(keypoints, [y,x,1]))
-    vectors = {}
-    angles = {}
-    for edge, color in edges.items():
-        p1, p2 = edge
-        y1, x1, c1 = shaped[p1]
-        y2, x2, c2 = shaped[p2]
-        
-        if (c1 > confidence_threshold) & (c2 > confidence_threshold):      
-            cv2.line(frame, (int(x1), int(y1)), (int(x2), int(y2)), (0,0,255), 2)
-            vector = np.array([x2 - x1, y2 - y1])
-            vectors[(p1,p2)]=vector
-            ref_vector = np.array([1, 0])
-            angle = calculate_angle(vector, ref_vector)
-            angles[(p1, p2)] = angle  # Store angle
+def extract_posture_from_video(
+    video_path,
+    output_csv,
+    posture_label,
+    output_dir="posture_frames",
+    model_url="https://tfhub.dev/google/movenet/singlepose/lightning/4"
+):
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    model = hub.load(model_url).signatures['serving_default']
+    input_size = 192
 
-    return frame, vectors, angles
-    
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise IOError("Cannot open video")
+
+    edge_keys = list(EDGES.keys())
+    vector_cols = [f"{a}_{b}_vx" for a, b in edge_keys] + [f"{a}_{b}_vy" for a, b in edge_keys]
+    angle_cols = [f"{a}_{b}_angle" for a, b in edge_keys]
+    header = ['frame_filename'] + vector_cols + angle_cols + ['label']
+
+    write_header = not os.path.exists(output_csv)
+    with open(output_csv, 'a', newline='') as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(header)
+
+        frame_index = 0
+        while cap.isOpened():
+            ret, frame = cap.read()
+            if not ret:
+                break
+
+            h, w, _ = frame.shape
+            resized = tf.image.resize_with_pad(np.expand_dims(frame, axis=0), input_size, input_size)
+            input_tensor = tf.cast(resized, dtype=tf.int32)
+            keypoints = model(input_tensor)['output_0'].numpy()[0, 0, :, :]
+
+            vectors, angles = compute_vectors_and_angles(keypoints, w, h)
+
+            frame_filename = f"{posture_label}_frame_{frame_index:04d}.jpg"
+            frame_path = os.path.join(output_dir, frame_filename)
+            cv2.imwrite(frame_path, frame)
+
+            row = [frame_filename]
+            for edge in edge_keys:
+                vx, vy = vectors.get(edge, (0, 0))
+                row.extend([vx, vy])
+            for edge in edge_keys:
+                angle = angles.get(edge, 0)
+                row.append(angle)
+            row.append(posture_label)
+
+            writer.writerow(row)
+            frame_index += 1
+
+        cap.release()
+    print(f"Saved {frame_index} and rows to {output_csv} and {output_dir}/")
+
+good_posture_path = "/content/drive/MyDrive/Dataset/Good_Posture.mp4"
+bad_posture_path = "/content/drive/MyDrive/Dataset/Bad_Posture.mp4"
+extract_posture_from_video(good_posture_path, "posture.csv", posture_label="good")
+extract_posture_from_video(bad_posture_path, "posture.csv", posture_label="bad")
+
+def zip_posture_frames(folder_path='posture_frames', output_zip='posture_frames.zip'):
+    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for root, dirs, files in os.walk(folder_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                arcname = os.path.relpath(file_path, folder_path)  # removes folder_path from path
+                zipf.write(file_path, arcname)
+    print(f"Folder '{folder_path}' compressed to '{output_zip}'")
+
+zip_posture_frames()
