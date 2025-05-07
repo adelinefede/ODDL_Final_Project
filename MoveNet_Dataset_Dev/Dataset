@@ -7,6 +7,8 @@ import csv
 import os
 import zipfile
 
+## Adapted from https://www.tensorflow.org/hub/tutorials/movenet 
+
 # Define keypoints
 KEYPOINT_DICT = {
     0: 'nose', 1: 'left_eye', 2: 'right_eye', 3: 'left_ear', 4: 'right_ear',
