@@ -1,3 +1,4 @@
+##Not deployed on Arduino Nano due to memory constraints, MoveNet Lightning at its smallest 4bit quant is 2 MB
 import tensorflow as tf
 from tensorflow.keras import layers, models
 import matplotlib.pyplot as plt
