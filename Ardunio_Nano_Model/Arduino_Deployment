@@ -1,0 +1,69 @@
+#include <TinyMLShield.h>
+#include "model_data.h"
+#include <TensorFlowLite.h>
+#include "tensorflow/lite/micro/all_ops_resolver.h"
+#include "tensorflow/lite/micro/micro_interpreter.h"
+#include "tensorflow/lite/schema/schema_generated.h"
+#include "tensorflow/lite/version.h"
+
+// Constants
+constexpr int FRAME_WIDTH = 32;
+constexpr int FRAME_HEIGHT = 32;
+constexpr int kTensorArenaSize = 20 * 1024;
+uint8_t tensor_arena[kTensorArenaSize];
+uint8_t camera_frame[FRAME_WIDTH * FRAME_HEIGHT];  
+
+// TensorFlow
+tflite::MicroInterpreter* interpreter;
+TfLiteTensor* input;
+TfLiteTensor* output;
+
+void setup() {
+  Serial.begin(115200);
+  while (!Serial);
+
+  if (Camera.begin(FRAME_WIDTH, FRAME_HEIGHT, GRAYSCALE, OV7675) != 0) {
+    Serial.println("Failed to initialize camera.");
+    while (1);
+  }
+
+  Serial.println("Camera ready.");
+
+  const tflite::Model* tflite_model = tflite::GetModel(pruned_quantized_posture_model_tflite);
+  static tflite::AllOpsResolver resolver;
+
+  static tflite::MicroInterpreter static_interpreter(
+    tflite_model, resolver, tensor_arena, kTensorArenaSize, nullptr, nullptr);
+  interpreter = &static_interpreter;
+
+  if (interpreter->AllocateTensors() != kTfLiteOk) {
+    Serial.println("AllocateTensors() failed.");
+    while (1);
+  }
+
+  input = interpreter->input(0);
+  output = interpreter->output(0);
+
+  Serial.println("Setup complete.");
+}
+
+void loop() {
+  Camera.readFrame((void*)camera_frame);  
+
+  for (int i = 0; i < FRAME_WIDTH * FRAME_HEIGHT; i++) {
+    input->data.int8[i] = camera_frame[i] - 128;  
+
+  if (interpreter->Invoke() != kTfLiteOk) {
+    Serial.println("Inference failed.");
+    return;
+  }
+
+  int8_t result = output->data.int8[0];
+  if (result > 0) {
+    Serial.println("Bad posture");
+  } else {
+    Serial.println("Good posture");
+  }
+
+  delay(1000);
+}
