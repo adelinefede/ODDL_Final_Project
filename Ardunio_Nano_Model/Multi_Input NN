@@ -1,0 +1,462 @@
+import tensorflow as tf
+from tensorflow.keras import layers, models
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import tensorflow as tf
+from sklearn.preprocessing import LabelEncoder
+
+
+frames_gp = '/content/drive/MyDrive/ODDL_Project/good_posture/'
+frames_bp = '/content/drive/MyDrive/ODDL_Project/bad_posture/'
+images = '/content/drive/MyDrive/ODDL_Project/Images/'
+batch_size = 32
+img_height = 480
+img_width = 640
+train_ds = tf.keras.utils.image_dataset_from_directory(
+  images,
+  validation_split=0.2,
+  subset="training",
+  seed=123,
+  image_size=(img_height, img_width),
+  batch_size=batch_size)
+val_ds = tf.keras.utils.image_dataset_from_directory(
+  images,
+  validation_split=0.2,
+  subset="validation",
+  seed=123,
+  image_size=(img_height, img_width),
+  batch_size=batch_size)
+
+
+SEED = 0
+np.random.seed(SEED)
+tf.random.set_seed(SEED)
+
+# List of posture labels
+POSTURE = ["good_posture", "bad_posture"]
+NUM_POSTURE = len(POSTURE)
+
+# One-hot encoding for labels
+ONE_HOT_ENCODED_POSTURE = np.eye(NUM_POSTURE)
+
+inputs = []
+outputs = []
+
+edge_encoder = LabelEncoder()
+data = pd.concat([df_bp,df_gp])
+all_edges = []
+all_edges.extend(data['Edge'].unique())
+edge_encoder.fit(np.unique(all_edges))
+
+for posture_index, posture in enumerate(POSTURE):
+    print(f"Processing index {posture_index} for posture '{posture}'.")
+    output = ONE_HOT_ENCODED_POSTURE[posture_index]  # One-hot encoding for label
+    df = pd.read_csv('/content/drive/MyDrive/ODDL_Project/'+ posture + ".csv")  # Adjust path if necessary
+
+    for index in range(len(df)):
+        frame = df['Frame Index'].iloc[index]
+        edge = df['Edge'].iloc[index]  # Assuming there's an 'Edge' column
+        edge_encoded = edge_encoder.transform([edge])[0]
+        angle = df['Angle'].iloc[index]  # Assuming there's an 'Angle' column
+        vectorX  = df['VectorX'].iloc[index]  # Assuming there's an 'Angle' column
+        vectorY  = df['VectorY'].iloc[index]  # Assuming there's an 'Angle' column
+        try:
+          angle = float(angle)
+        except ValueError:
+          print(f"Error converting angle: {angle}")
+          continue
+        # Create tensor with encoded edge and angle
+        tensor = [float(frame), float(edge_encoded), float(angle), float(vectorX), float(vectorY)]  # Explicitly cast to float
+        inputs.append(tensor)
+        outputs.append(output)
+
+inputs = np.array(inputs, dtype=np.float32)
+outputs = np.array(outputs)
+
+model = models.Sequential([
+    layers.InputLayer(input_shape=(5,)),  # 2 input features (edge, angle)
+    layers.Dense(64, activation='relu'),
+    layers.Dense(32, activation='relu'),
+    layers.Dense(NUM_POSTURE, activation='softmax')  # Output layer with 2 neurons for good/bad posture
+])
+
+model.compile(optimizer='adam',
+              loss='categorical_crossentropy',
+              metrics=['accuracy'])
+
+# Check if inputs and outputs are correct
+print(f"Inputs dtype: {inputs.dtype}, Outputs dtype: {outputs.dtype}")
+
+model.fit(inputs, outputs, epochs=30, batch_size=32, validation_split=0.2)
+
+# Evaluate the model (optional)
+test_loss, test_acc = model.evaluate(inputs, outputs, verbose=2)
+print(f"Test accuracy: {test_acc}")
+
+model.summary()
+
+import tensorflow as tf
+import numpy as np
+import time
+from typing import Dict, List, Tuple, Any
+
+def quantize_to_4bit_with_8bit_scales(model, inputs_test, outputs_test):
+    """
+    Properly implemented 4-bit quantization with 8-bit scaling factors for neural networks.
+    Uses actual bit packing for true 4-bit storage.
+
+    Args:
+        model: TensorFlow model to quantize
+        inputs_test: Test inputs for accuracy evaluation
+        outputs_test: Test outputs for accuracy evaluation
+
+    Returns:
+        A quantized model representation
+    """
+    print("\n===== TRUE 4-BIT QUANTIZATION WITH 8-BIT SCALES =====")
+
+    # Define quantization parameters
+    BITS = 4
+    SCALE_BITS = 8
+    GROUP_SIZE = 32  # Power of 2 for more efficient packing
+
+    # Calculate original model size
+    original_model_size = 0
+    for weight in model.weights:
+        original_model_size += np.prod(weight.shape) * 4  # 4 bytes per float32
+
+    print(f"Original model size: {original_model_size / 1024:.2f} KB")
+
+    def pack_4bit_values(values: np.ndarray) -> np.ndarray:
+        """
+        Properly pack 4-bit values into 8-bit storage (two 4-bit values per byte).
+
+        Args:
+            values: Array of integers in 4-bit range [-8, 7]
+
+        Returns:
+            Packed bytes with two 4-bit values per byte
+        """
+        # Ensure values are in correct range and type
+        assert values.min() >= -(1 << (BITS-1)) and values.max() < (1 << (BITS-1)), \
+            f"Values out of 4-bit range: min={values.min()}, max={values.max()}"
+
+        # Convert -8..7 range to 0..15 range for easier packing
+        unsigned_values = (values + (1 << (BITS-1))) & 0xF
+
+        # Ensure we have even number of elements (for paired packing)
+        if len(unsigned_values) % 2 != 0:
+            unsigned_values = np.pad(unsigned_values, (0, 1), 'constant')
+
+        # Reshape to pairs and pack
+        pairs = unsigned_values.reshape(-1, 2)
+        packed = (pairs[:, 0] | (pairs[:, 1] << 4)).astype(np.uint8)
+
+        return packed
+
+    def unpack_4bit_values(packed: np.ndarray, length: int) -> np.ndarray:
+        """
+        Unpack 8-bit storage back to 4-bit values.
+
+        Args:
+            packed: Packed bytes with two 4-bit values per byte
+            length: Original number of elements
+
+        Returns:
+            Unpacked 4-bit values
+        """
+        # Unpack each byte into two 4-bit values
+        unpacked = np.zeros(len(packed) * 2, dtype=np.int8)
+        unpacked[0::2] = packed & 0xF  # Lower 4 bits
+        unpacked[1::2] = (packed >> 4) & 0xF  # Upper 4 bits
+
+        # Convert from 0..15 back to -8..7 range
+        unpacked = unpacked.astype(np.int8) - (1 << (BITS-1))
+
+        # Trim to original length
+        return unpacked[:length]
+
+    def quantize_tensor(weights: np.ndarray) -> Dict[str, Any]:
+        """
+        4-bit quantization with properly packed storage and 8-bit scaling factors.
+
+        Args:
+            weights: Original floating point weights
+
+        Returns:
+            Dictionary containing quantized representation
+        """
+        original_shape = weights.shape
+        flattened = weights.flatten()
+
+        # Calculate number of complete groups and elements
+        num_elements = len(flattened)
+        num_groups = (num_elements + GROUP_SIZE - 1) // GROUP_SIZE
+
+        # Pad to multiple of GROUP_SIZE
+        padded_length = num_groups * GROUP_SIZE
+        padded = np.zeros(padded_length, dtype=np.float32)
+        padded[:num_elements] = flattened
+
+        # Reshape to groups
+        groups = padded.reshape(-1, GROUP_SIZE)
+
+        # Calculate scale factors (one per group)
+        scales = np.zeros(num_groups, dtype=np.float32)
+        for i in range(num_groups):
+            abs_max = np.max(np.abs(groups[i]))
+            # Avoid division by zero, ensure minimal precision
+            scales[i] = max(abs_max / ((1 << (BITS-1)) - 1), 1e-10)
+
+        # Quantize weights to 4-bit values
+        quantized = np.zeros_like(groups, dtype=np.int8)
+        for i in range(num_groups):
+            # Scale and round to nearest integers in 4-bit range
+            quantized[i] = np.clip(
+                np.round(groups[i] / scales[i]),
+                -(1 << (BITS-1)),
+                (1 << (BITS-1)) - 1
+            ).astype(np.int8)
+
+        # Pack the 4-bit values efficiently - each group separately for better access
+        packed_groups = []
+        for i in range(num_groups):
+            packed_groups.append(pack_4bit_values(quantized[i]))
+
+        # Quantize scales to 8-bit
+        abs_max_scale = np.max(scales)
+        if abs_max_scale < 1e-10:
+            abs_max_scale = 1.0  # Fallback for all-zero weights
+
+        quantized_scales = np.clip(
+            np.round(scales / abs_max_scale * ((1 << (SCALE_BITS-1)) - 1)),
+            1,  # Minimum non-zero scale
+            (1 << (SCALE_BITS-1)) - 1
+        ).astype(np.uint8)
+
+        # Calculate true compressed size in bytes
+        # Each 4-bit value takes 0.5 bytes and each scale takes 1 byte
+        num_packed_bytes = sum(len(group) for group in packed_groups)
+        scales_bytes = len(quantized_scales)
+
+        # Need to store max_scale (4 bytes) and metadata for reconstruction
+        metadata_bytes = 4 + 4 + 4  # max_scale, shape info, num_groups
+
+        compressed_size = num_packed_bytes + scales_bytes + metadata_bytes
+        compression_ratio = (num_elements * 4) / compressed_size
+
+        return {
+            "packed_groups": packed_groups,
+            "quantized_scales": quantized_scales,
+            "max_scale": abs_max_scale,
+            "original_shape": original_shape,
+            "num_elements": num_elements,
+            "num_groups": num_groups,
+            "group_size": GROUP_SIZE,
+            "compressed_size": compressed_size,
+            "compression_ratio": compression_ratio
+        }
+
+    def dequantize_tensor(quantized_data: Dict[str, Any]) -> np.ndarray:
+        """
+        Dequantize 4-bit weights back to float.
+
+        Args:
+            quantized_data: Dictionary containing quantized representation
+
+        Returns:
+            Dequantized weights as floating point
+        """
+        packed_groups = quantized_data["packed_groups"]
+        quantized_scales = quantized_data["quantized_scales"]
+        max_scale = quantized_data["max_scale"]
+        original_shape = quantized_data["original_shape"]
+        num_elements = quantized_data["num_elements"]
+        num_groups = quantized_data["num_groups"]
+        group_size = quantized_data["group_size"]
+
+        # Dequantize scales
+        scales = quantized_scales.astype(np.float32) / ((1 << (SCALE_BITS-1)) - 1) * max_scale
+
+        # Unpack and dequantize each group
+        dequantized = np.zeros(num_groups * group_size, dtype=np.float32)
+
+        for i in range(num_groups):
+            # Unpack this group's values
+            unpacked = unpack_4bit_values(packed_groups[i], group_size)
+
+            # Convert to float and apply scale
+            start_idx = i * group_size
+            end_idx = start_idx + group_size
+            dequantized[start_idx:end_idx] = unpacked.astype(np.float32) * scales[i]
+
+        # Reshape back to original dimensions and trim padding
+        result = dequantized[:num_elements].reshape(original_shape)
+        return result
+
+    # Process model weights
+    quantized_weights_data = []
+    total_original_size = 0
+    total_compressed_size = 0
+
+    for i, weight in enumerate(model.weights):
+        weight_np = weight.numpy()
+        original_size = weight_np.size * 4  # 4 bytes per float32
+        total_original_size += original_size
+
+        print(f"\nQuantizing weight layer {i}, shape {weight_np.shape}:")
+
+        # Skip quantization for very small tensors (like biases) and empty tensors
+        if weight_np.size <= 32 or weight_np.size == 0:
+            print(f"  Small tensor (size {weight_np.size}), keeping in full precision.")
+            quantized_data = {
+                "weight": weight_np,
+                "is_quantized": False,
+                "compressed_size": original_size,
+                "compression_ratio": 1.0
+            }
+        else:
+            # Quantize
+            quantized_data = quantize_tensor(weight_np)
+            quantized_data["is_quantized"] = True
+
+        quantized_weights_data.append(quantized_data)
+        compressed_size = quantized_data["compressed_size"]
+        total_compressed_size += compressed_size
+
+        print(f"  Original size: {original_size} bytes")
+        print(f"  Compressed size: {compressed_size} bytes")
+        print(f"  Compression ratio: {original_size / compressed_size:.2f}x")
+
+        # For quantized tensors, evaluate error
+        if quantized_data.get("is_quantized", False):
+            # Dequantize to check accuracy
+            dequantized = dequantize_tensor(quantized_data)
+            error = np.abs(weight_np - dequantized)
+            mean_error = np.mean(error)
+            max_error = np.max(error)
+            print(f"  Mean absolute error: {mean_error:.6f}")
+            print(f"  Max absolute error: {max_error:.6f}")
+
+    print("\n===== QUANTIZATION SUMMARY =====")
+    print(f"Total original weights size: {total_original_size / 1024:.2f} KB")
+    print(f"Total quantized weights size: {total_compressed_size / 1024:.2f} KB")
+    print(f"Overall compression ratio: {total_original_size / total_compressed_size:.2f}x")
+
+    # Create a class to represent the quantized model for inference
+    class QuantizedModel:
+        def __init__(self,
+                     original_model,
+                     quantized_weights_data):
+            self.original_model = original_model
+            self.quantized_weights_data = quantized_weights_data
+            self.weight_shapes = [w.shape for w in original_model.weights]
+            self.architecture = original_model.to_json()
+
+        def get_dequantized_weights(self):
+            """Return dequantized weights for evaluation"""
+            dequantized_weights = []
+
+            for i, qw_data in enumerate(self.quantized_weights_data):
+                if qw_data.get("is_quantized", False):
+                    dequantized = dequantize_tensor(qw_data)
+                else:
+                    dequantized = qw_data["weight"]
+                dequantized_weights.append(dequantized)
+
+            return dequantized_weights
+
+        def create_inference_model(self):
+            """Create a model with dequantized weights for inference"""
+            # Create a new model with the same architecture
+            inference_model = tf.keras.models.model_from_json(self.architecture)
+            inference_model.compile(
+                optimizer='adam',
+                loss='categorical_crossentropy',
+                metrics=['accuracy']
+            )
+
+            # Set dequantized weights
+            dequantized_weights = self.get_dequantized_weights()
+            inference_model.set_weights(dequantized_weights)
+
+            return inference_model
+
+        def predict(self, inputs):
+            """Make predictions using a temporarily dequantized model"""
+            # Create inference model with dequantized weights
+            inference_model = self.create_inference_model()
+            # Run prediction
+            return inference_model.predict(inputs)
+
+    # Create quantized model
+    quantized_model = QuantizedModel(model, quantized_weights_data)
+
+    # Evaluate models
+    test_subset = min(500, len(inputs_test))
+    test_inputs = inputs_test[:test_subset]
+    test_outputs = outputs_test[:test_subset]
+
+    # Create inference model for evaluation
+    inference_model = quantized_model.create_inference_model()
+
+    # Original model accuracy
+    original_predictions = model.predict(test_inputs)
+    original_pred_classes = np.argmax(original_predictions, axis=1)
+    original_true_classes = np.argmax(test_outputs, axis=1)
+    original_accuracy = np.mean(original_pred_classes == original_true_classes)
+
+    # Quantized model accuracy
+    quantized_predictions = inference_model.predict(test_inputs)
+    quantized_pred_classes = np.argmax(quantized_predictions, axis=1)
+    quantized_accuracy = np.mean(quantized_pred_classes == original_true_classes)
+
+    # Check agreement between models
+    agreement = np.mean(original_pred_classes == quantized_pred_classes)
+
+    print("\n===== MODEL PERFORMANCE =====")
+    print(f"Original model accuracy: {original_accuracy:.4f}")
+    print(f"Quantized model accuracy: {quantized_accuracy:.4f}")
+    print(f"Accuracy difference: {original_accuracy - quantized_accuracy:.4f}")
+    print(f"Agreement between models: {agreement:.4f}")
+
+    # Proper benchmarking with warmup
+    def benchmark_inference(model_fn, inputs, num_runs=50, warmup=10):
+        """Properly benchmark inference time"""
+        # Warmup runs
+        for _ in range(warmup):
+            _ = model_fn(inputs[0:1])
+
+        # Timed runs
+        start_time = time.time()
+        for _ in range(num_runs):
+            _ = model_fn(inputs[0:1])
+        end_time = time.time()
+
+        # Calculate average time in milliseconds
+        avg_time = (end_time - start_time) * 1000 / num_runs
+        return avg_time
+
+    # Benchmark inference speed
+    original_time = benchmark_inference(model.predict, test_inputs)
+    quantized_time = benchmark_inference(inference_model.predict, test_inputs)
+
+    print("\n===== INFERENCE SPEED COMPARISON =====")
+    print(f"Original model average inference time: {original_time:.2f} ms")
+    print(f"Quantized model average inference time: {quantized_time:.2f} ms")
+    print(f"Speedup: {original_time / quantized_time:.2f}x")
+
+    return quantized_model
+
+quantized_model = quantize_to_4bit_with_8bit_scales(model, inputs_test, outputs_test)
+
+converter = tf.lite.TFLiteConverter.from_keras_model(quantized_model)
+tflite_model = converter.convert()
+
+# Save the model to disk
+open("quantized_posture_model.tflite", "wb").write(tflite_model)
+
+import os
+basic_model_size = os.path.getsize("quantized_posture_model.tflite")
+print("Model is %d bytes" % basic_model_size)
